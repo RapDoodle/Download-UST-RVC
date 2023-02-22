@@ -12,7 +12,7 @@ The downloaded recording are for your personal use only. Do NOT share the record
 1. Open a Terminal / Command Prompt and install the tool with `pip`.
 
     ```bash
-    pip install https://github.com/RapDoodle/Download-UST-RVC.git
+    pip install git+https://github.com/RapDoodle/Download-UST-RVC.git
     ```
 
 1. Install [`ffmepg`](https://ffmpeg.org/) and make sure it is in your `PATH`.
@@ -32,7 +32,7 @@ The downloaded recording are for your personal use only. Do NOT share the record
 
 1. Open the browser's developer tool (for Google Chrome, it can be opened with F12) and navigate to the `Network` panel.
 
-1. Play the video. After the video have started playing, stop the video and find the chunklist's URL. 
+1. Play the video. After the video have started playing, pause the video and find the chunklist's URL. 
 
     <img src="guide.png?raw=true" height="350">
 
