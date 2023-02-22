@@ -158,7 +158,7 @@ def display(msg, mode=DISP_MODE_LOG):
     print(f'{prefix} {msg}')
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '-u', 
@@ -248,7 +248,12 @@ if __name__ == '__main__':
     pbar.close()
 
     find_missing_downloads(urls, downloaded_files, True)
-    concat_m3u8_to_mp4(downloaded_files, urls, download_directory, args.output, True)
+    concat_m3u8_to_mp4(downloaded_files, urls, '.', args.output, True)
     remove_downloaded_files(downloaded_files, download_directory)
 
     display('Done', DISP_MODE_OK)
+
+
+if __name__ == '__main__':
+    main()
+
