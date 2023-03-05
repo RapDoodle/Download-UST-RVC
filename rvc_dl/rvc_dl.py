@@ -10,12 +10,11 @@ import subprocess
 from tqdm import tqdm
 from time import sleep
 from random import gauss
+from requests.adapters import HTTPAdapter
 from urllib.parse import unquote, urlparse
 
-DISP_MODE_LOG = 0
-DISP_MODE_OK = 1
-DISP_MODE_WARNING = 2
-DISP_MODE_ERROR = 3
+from .cli import display, y_n_choice
+from .cli import DISP_MODE_LOG, DISP_MODE_OK, DISP_MODE_WARNING, DISP_MODE_ERROR
 
 TEMP_VIDEO_LIST = 'videolist'
 TEMP_FOLDER = './temp'
@@ -41,7 +40,40 @@ def get_urls_from_chunklist(chunklist_url, headers = {}):
                 yield url
 
 
-def concat_m3u8_to_mp4(downloaded_files, urls, output_directory, output_filename, override_warning=True, **kwargs):
+def find_missing_downloads(urls, downloaded_files, prompt=True, accept_all=False, **kwargs):
+    """
+    Find the downloads that are missing as a result of unsuccessful 
+    download for invalid urls
+    Arguments:
+        urls: a list of urls
+        downloaded_files: a list containing the paths to the 
+            downloaded files
+        promot: a boolean indicating whether confirmation is needed 
+            before proceeding
+    Returns:
+        failed_urls: a list of failed urls
+    """
+    missing_count = 0
+    failed_urls = []
+    for index, file in enumerate(downloaded_files):
+        if file is None:
+            curr_file_url = urls[index]
+            failed_urls.append(curr_file_url)
+            display(f'{curr_file_url} was not downloaded successfully.', DISP_MODE_WARNING)
+            missing_count = missing_count + 1
+    
+    if missing_count > 0:
+        warning_msg = f'There are {missing_count} missing file(s).' 
+        if prompt:
+            if not accept_all and not y_n_choice(f'{warning_msg} Do you want to retry?', default_choice=True):
+                exit()
+        else:
+            display(warning_msg, DISP_MODE_WARNING)
+    
+    return failed_urls
+
+
+def concat_ts_clips_to_mp4(downloaded_files, urls, output_directory, output_filename, override_warning=True, **kwargs):
     """
     Convert m3u8 clips to an mp4 file
     """
@@ -103,61 +135,6 @@ def remove_downloaded_files(downloaded_files, directory, **kwargs):
             display(f'Permission denied. Unable to delete the empty folder {directory}', DISP_MODE_ERROR)
 
 
-def find_missing_downloads(urls, downloaded_files, prompt=True, **kwargs):
-    """
-    Find the downloads that are missing as a result of unsuccessful 
-    download for invalid urls
-    Arguments:
-        urls: a list of urls
-        downloaded_files: a list containing the paths to the 
-            downloaded files
-        promot: a boolean indicating whether confirmation is needed 
-            before proceeding
-    """
-    missing_count = 0 
-    for index, file in enumerate(downloaded_files):
-        if file is None:
-            curr_file_url = urls[index]
-            display(f'The file content for {curr_file_url} is empty.', DISP_MODE_WARNING)
-            missing_count = missing_count + 1
-    
-    if missing_count > 0:
-        warning_msg = f'There are {missing_count} missing file(s).' 
-        if prompt:
-            if not y_n_choice(f'{warning_msg} Are you sure to continue?', default_choice=False):
-                exit()
-        else:
-            display(warning_msg, DISP_MODE_WARNING)
-
-
-def y_n_choice(msg='Do you want to continue?', default_choice=False):
-    default_choice_str = 'yes' if default_choice else 'no'
-    while (True):
-        choice = input(f'{msg} (default: {default_choice_str}) [Y/n] ')
-        if choice == '':
-            # Case: default
-            return default_choice
-        if choice.lower() == 'y':
-            # Case: confirm
-            return True
-        if choice.lower() == 'n':
-            # Case: reject
-            return False
-        # Case: unkown, continue
-
-
-def display(msg, mode=DISP_MODE_LOG):
-    if mode == DISP_MODE_OK:
-        prefix = '[√]'
-    elif mode == DISP_MODE_WARNING:
-        prefix = '[!]'
-    elif mode == DISP_MODE_ERROR:
-        prefix = '[x]'
-    else:
-        prefix = '[*]'
-    print(f'{prefix} {msg}')
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -174,81 +151,103 @@ def main():
         default=None,
         help='output filename')
     parser.add_argument(
-        '-w', 
-        '--workers', 
+        '-c', 
+        '--connections', 
         metavar='INT', 
         type=int,
         required=False, 
         default=10,
         help='number of workers')
+    parser.add_argument(
+        '--safe-mode', 
+        default=False,
+        action='store_true',
+        help='reduce the connection speed to a safe rate')
     args = parser.parse_args()
 
     interval_mean = 0
     interval_std = 0
-    timeout = 180
+    if args.safe_mode:
+        interval_mean = 3
+        interval_std = 2
+    timeout = 10
     download_directory = TEMP_FOLDER
     urls = list(get_urls_from_chunklist(args.url))
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
     }
 
     # Get the total number of urls to visit
     total = len(list(urls))
-
-    # Atomic counter for the number of completed/failed downloads
-    cont = itertools.count()
+    pending_count = total
 
     # Create directory if not exists
     if not os.path.exists(download_directory):
         os.mkdir(download_directory)
-
-    # Initialize progress bar
-    pbar = tqdm(total=total, unit='files')
+    
     downloaded_files = [None] * total
+    pending_urls = urls.copy()
 
-    def fetch(i, url, dst):
-        """
-        Download from a given resource
-        Arguments:
-            i: id/index of the current job
-            url: url to the resource
-            dst: destination folder
-        """
-        try:
-            with requests.get(url, headers=headers, allow_redirects=True) as r:
-                status_code_str = str(r.status_code)
-                if status_code_str.startswith('4') or status_code_str.startswith('5'):
-                    return
-                fname = ''
-                if "Content-Disposition" in r.headers.keys():
-                    fname = re.findall("filename=(.+)", unquote(r.headers["Content-Disposition"]))[0]
-                    fname = fname.replace('\t', '')
-                    fname = fname.replace('|', '')
-                    fname = fname.replace('"', '')
-                    fname = fname.replace('/', '')
-                else:
-                    fname = os.path.basename(urlparse(url).path)
-                fpath = f'{dst}/{fname}'
-                with open(fpath, 'wb') as f:
-                    f.write(r.content)
-                    downloaded_files[i] = fpath
-        except requests.RequestException as e:
-            display(f'Failed to download {url}', DISP_MODE_ERROR)
-        pbar.n = next(cont)
-        pbar.update()
+    while True:
+        # Initialize progress bar
+        pbar = tqdm(total=pending_count, unit='files')
 
-    # Submit jobs to parallel workers
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-        future_list = list()
-        for index, url in enumerate(urls):
-            sleep(max(gauss(mu=interval_mean, sigma=interval_std), 0))
-            future_list.append(executor.submit(fetch, index, url, download_directory))
-        concurrent.futures.wait(future_list, timeout=timeout)
+        # Atomic counter for the number of completed/failed downloads
+        cont = itertools.count()
 
-    pbar.close()
+        # Open a connection pool
+        session = requests.Session()
+        session.mount('https://', HTTPAdapter(pool_connections=args.connections, max_retries=0))
 
-    find_missing_downloads(urls, downloaded_files, True)
-    concat_m3u8_to_mp4(downloaded_files, urls, '.', args.output, True)
+        def fetch(i, url, dst):
+            """
+            Download from a given resource
+            Arguments:
+                i: id/index of the current job
+                url: url to the resource
+                dst: destination folder
+            """
+            if url is None:
+                return
+            try:
+                with session.get(url, headers=headers, allow_redirects=True, timeout=timeout) as r:
+                    status_code_str = str(r.status_code)
+                    if status_code_str.startswith('4') or status_code_str.startswith('5'):
+                        return
+                    fname = ''
+                    if "Content-Disposition" in r.headers.keys():
+                        fname = re.findall("filename=(.+)", unquote(r.headers["Content-Disposition"]))[0]
+                        fname = fname.replace('\t', '')
+                        fname = fname.replace('|', '')
+                        fname = fname.replace('"', '')
+                        fname = fname.replace('/', '')
+                    else:
+                        fname = os.path.basename(urlparse(url).path)
+                    fpath = f'{dst}/{fname}'
+                    with open(fpath, 'wb') as f:
+                        f.write(r.content)
+                        downloaded_files[i] = fpath
+                        pending_urls[i] = None
+            except requests.RequestException as e:
+                display(f'Failed to download {url}', DISP_MODE_ERROR)
+            pbar.n = next(cont)
+            pbar.update()
+
+        # Submit jobs to parallel workers
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.connections) as executor:
+            future_list = list()
+            for index, url in enumerate(pending_urls):
+                sleep(max(gauss(mu=interval_mean, sigma=interval_std), 0))
+                future_list.append(executor.submit(fetch, index, url, download_directory))
+            concurrent.futures.wait(future_list, timeout=timeout)
+
+        pbar.close()
+
+        pending_count = len(find_missing_downloads(urls, downloaded_files, True, accept_all=True))
+        if pending_count == 0:
+            break
+
+    concat_ts_clips_to_mp4(downloaded_files, urls, '.', args.output, True)
     remove_downloaded_files(downloaded_files, download_directory)
 
     display('Done', DISP_MODE_OK)
